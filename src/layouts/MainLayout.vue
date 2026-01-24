@@ -1,6 +1,6 @@
 <template>
   <q-layout view="lHh Lpr lFf">
-    <q-header elevated>
+    <q-header elevated class="bg-grey-9">
       <q-toolbar>
         <q-btn
           flat
@@ -12,10 +12,10 @@
         />
 
         <q-toolbar-title>
-          Quasar App
+          AIBuddy
         </q-toolbar-title>
 
-        <div>Quasar v{{ $q.version }}</div>
+        <div>Ask me anything, bud!</div>
       </q-toolbar>
     </q-header>
 
@@ -28,14 +28,14 @@
         <q-item-label
           header
         >
-          Essential Links
+          Conversas
         </q-item-label>
 
-        <EssentialLink
+        <!-- <EssentialLink
           v-for="link in linksList"
           :key="link.title"
           v-bind="link"
-        />
+        /> -->
       </q-list>
     </q-drawer>
 
