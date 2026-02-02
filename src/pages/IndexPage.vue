@@ -8,13 +8,12 @@
           <div class="col">
             <div class="text-h6 text-weight-bold">DevIA</div>
             <div class="text-caption opacity-80">
-              Ollama via WebSocket
+              session: <span class="text-mono">{{ sessionId }}</span>
             </div>
           </div>
 
           <q-badge
             :color="wsStatus === 'open' ? 'positive' : (wsStatus === 'connecting' ? 'warning' : 'negative')"
-            class="q-ml-sm"
             rounded
           >
             {{ wsStatusLabel }}
@@ -22,31 +21,26 @@
         </div>
       </q-card>
 
-      <!-- Chat body -->
+      <!-- Chat -->
       <q-card class="chat-body">
         <q-scroll-area ref="scrollArea" class="chat-scroll">
           <div class="q-pa-md">
-
             <div v-if="chat.qa.length === 0" class="empty-state q-pa-xl">
               <div class="text-h6 text-weight-bold q-mb-sm">Start a conversation</div>
               <div class="text-body2 opacity-80">
-                Ask something like “Create a Maven Spring Boot WebSocket API for Ollama”.
+                Markdown supported: code blocks, lists, bold, etc.
               </div>
-              <q-chip class="q-mt-md" color="primary" text-color="white" icon="tips_and_updates">
-                Tip: Press Enter to send • Shift+Enter for new line
-              </q-chip>
             </div>
 
             <div v-for="(qa, idx) in chat.qa" :key="idx" class="q-mb-lg">
-
-              <!-- User bubble -->
+              <!-- user -->
               <div class="row justify-end">
                 <div class="bubble bubble-user">
                   <div class="bubble-text">{{ qa.question }}</div>
                 </div>
               </div>
 
-              <!-- Assistant bubble -->
+              <!-- assistant -->
               <div class="row justify-start q-mt-sm">
                 <div class="bubble bubble-ai">
                   <div class="row items-center q-mb-xs">
@@ -54,31 +48,35 @@
                       AI
                     </q-avatar>
                     <div class="text-caption opacity-70">Assistant</div>
+                    <q-space />
+                    <q-chip v-if="qa.cancelled" dense color="warning" text-color="black">cancelled</q-chip>
                   </div>
 
                   <div class="bubble-text">
-                    <!-- show streaming content only for last message being generated -->
+                    <!-- streaming content for last item -->
                     <template v-if="isLoading && idx === chat.qa.length - 1">
-                      <span v-if="message.length">{{ message }}</span>
-                      <span v-else class="opacity-70">Thinking…</span>
-
-                      <span class="cursor" aria-hidden="true">▍</span>
+                      <div v-if="message.length" v-html="renderMarkdown(message)" />
+                      <div v-else class="typing">
+                        <span class="dot" />
+                        <span class="dot" />
+                        <span class="dot" />
+                      </div>
                     </template>
 
                     <template v-else>
-                      <span v-if="qa.answer">{{ qa.answer }}</span>
+                      <div v-if="qa.answer" v-html="renderMarkdown(qa.answer)" />
                       <span v-else class="opacity-70">…</span>
                     </template>
                   </div>
                 </div>
               </div>
-
             </div>
+
           </div>
         </q-scroll-area>
       </q-card>
 
-      <!-- Composer (sticky) -->
+      <!-- Composer -->
       <q-card class="chat-composer q-pa-md">
         <q-form @submit.prevent="onSubmit" class="row items-end q-col-gutter-sm">
           <div class="col">
@@ -86,10 +84,9 @@
               v-model="input"
               type="textarea"
               autogrow
-              :max-height="160"
               outlined
               rounded
-              placeholder="Type your message…"
+              placeholder="Type your message… (Markdown supported)"
               :disable="wsStatus !== 'open'"
               @keydown.enter.exact.prevent="onSubmit"
               @keydown.enter.shift.exact.stop
@@ -108,30 +105,36 @@
               icon="send"
               label="Send"
               :loading="isLoading"
-              :disable="wsStatus !== 'open' || !input.trim()"
+              :disable="wsStatus !== 'open' || !input.trim() || isLoading"
               @click="onSubmit"
+            />
+          </div>
+
+          <div class="col-auto">
+            <q-btn
+              v-if="isLoading"
+              color="negative"
+              rounded
+              flat
+              icon="stop_circle"
+              label="Stop"
+              @click="stopGenerating"
             />
           </div>
         </q-form>
 
         <div class="row items-center q-mt-sm">
           <q-chip dense square class="q-mr-sm" icon="memory" color="grey-9" text-color="white">
-            model: deepseek-r1:1.5b
+            model: {{ model }}
           </q-chip>
+
           <div class="text-caption opacity-70">
             {{ wsStatus === 'open' ? 'Ready' : 'WebSocket not connected' }}
           </div>
 
           <q-space />
 
-          <q-btn
-            flat
-            dense
-            icon="delete_sweep"
-            label="Clear"
-            class="opacity-70"
-            @click="clearChat"
-          />
+          <q-btn flat dense icon="delete_sweep" label="Clear" class="opacity-70" @click="clearChat" />
         </div>
       </q-card>
 
@@ -140,20 +143,81 @@
 </template>
 
 <script setup lang="ts">
-import type { Chat } from 'src/types'
-import { nextTick, onMounted, onBeforeUnmount, ref, computed } from 'vue'
+import { nextTick, onMounted, onBeforeUnmount, ref, computed, watch } from 'vue'
+import MarkdownIt from 'markdown-it'
+import hljs from 'highlight.js'
+import DOMPurify from 'dompurify'
+
+// Extend your Chat type to allow cancelled flag
+type QA = { question: string; answer: string; cancelled?: boolean }
+type Chat = { qa: QA[] }
 
 const connection = ref<WebSocket | null>(null)
 const wsStatus = ref<'connecting' | 'open' | 'closed'>('connecting')
 
+const model = ref('deepseek-r1:1.5b')
 const message = ref('')
 const input = ref('')
 const chat = ref<Chat>({ qa: [] })
 const isLoading = ref(false)
 
-// Quasar QScrollArea exposes methods; we’ll use its internal API safely
 const scrollArea = ref()
 
+// --- Session + local history ---
+const sessionId = ref<string>('')
+
+function getOrCreateSessionId() {
+  const key = 'devia_session_id'
+  const existing = localStorage.getItem(key)
+  if (existing) return existing
+  const fresh = (crypto?.randomUUID?.() ?? String(Date.now()))
+  localStorage.setItem(key, fresh)
+  return fresh
+}
+
+function historyKey() {
+  return `devia_history_${sessionId.value}`
+}
+
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(historyKey())
+    if (!raw) return
+    const parsed = JSON.parse(raw)
+    if (parsed?.qa?.length) chat.value = parsed
+  } catch {}
+}
+
+function saveHistory() {
+  try {
+    localStorage.setItem(historyKey(), JSON.stringify(chat.value))
+  } catch {}
+}
+
+watch(chat, saveHistory, { deep: true })
+
+// --- Markdown renderer ---
+const md = new MarkdownIt({
+  linkify: true,
+  breaks: true,
+  highlight: (code, lang) => {
+    try {
+      if (lang && hljs.getLanguage(lang)) {
+        return `<pre class="hljs"><code>${hljs.highlight(code, { language: lang }).value}</code></pre>`
+      }
+      return `<pre class="hljs"><code>${hljs.highlightAuto(code).value}</code></pre>`
+    } catch {
+      return `<pre class="hljs"><code>${md.utils.escapeHtml(code)}</code></pre>`
+    }
+  }
+})
+
+function renderMarkdown(text: string) {
+  const unsafe = md.render(text || '')
+  return DOMPurify.sanitize(unsafe)
+}
+
+// --- UI helpers ---
 const wsStatusLabel = computed(() => {
   if (wsStatus.value === 'open') return 'Connected'
   if (wsStatus.value === 'connecting') return 'Connecting'
@@ -163,94 +227,102 @@ const wsStatusLabel = computed(() => {
 async function scrollToBottom() {
   await nextTick(() => {
     try {
-      const sa = scrollArea.value
-      // QScrollArea has setScrollPosition('vertical', value, duration)
-      // We scroll to a very large number to reach bottom.
-      sa?.setScrollPosition?.('vertical', 10_000_000, 200)
-    } catch (e) {
-      console.error(e)
-    }
+      scrollArea.value?.setScrollPosition?.('vertical', 10_000_000, 200)
+    } catch {}
   })
 }
 
+// --- WebSocket ---
 function connectWs() {
   wsStatus.value = 'connecting'
   const ws = new WebSocket('ws://localhost:8080/ws/chat')
   connection.value = ws
 
-  ws.onopen = () => {
-    wsStatus.value = 'open'
-  }
+  ws.onopen = () => (wsStatus.value = 'open')
+  ws.onclose = () => { wsStatus.value = 'closed'; isLoading.value = false }
+  ws.onerror = () => { wsStatus.value = 'closed'; isLoading.value = false }
 
-  ws.onclose = () => {
-    wsStatus.value = 'closed'
-    isLoading.value = false
-  }
-
-  ws.onerror = () => {
-    wsStatus.value = 'closed'
-    isLoading.value = false
-  }
-
-  ws.onmessage = async (event) => {
+  ws.onmessage = (event) => {
     if (!event.data) return
     const json = JSON.parse(event.data)
 
-    if (json.type !== 'done') {
+    if (json.type === 'delta') {
       message.value += json.content ?? ''
-      await scrollToBottom()
+      scrollToBottom()
       return
     }
 
-    // done
-    const last = chat.value.qa[chat.value.qa.length - 1]
-    if (last) last.answer = message.value
+    if (json.type === 'cancelled') {
+      const last = chat.value.qa[chat.value.qa.length - 1]
+      if (last) {
+        last.answer = message.value
+        last.cancelled = true
+      }
+      isLoading.value = false
+      message.value = ''
+      scrollToBottom()
+      return
+    }
 
-    isLoading.value = false
-    message.value = ''
-    input.value = ''
-    await scrollToBottom()
+    if (json.type === 'done') {
+      const last = chat.value.qa[chat.value.qa.length - 1]
+      if (last) last.answer = message.value
+      isLoading.value = false
+      message.value = ''
+      input.value = ''
+      scrollToBottom()
+      return
+    }
+
+    if (json.type === 'error') {
+      const last = chat.value.qa[chat.value.qa.length - 1]
+      if (last) last.answer = `**Error:** ${json.message ?? 'unknown'}`
+      isLoading.value = false
+      message.value = ''
+      scrollToBottom()
+    }
   }
 }
 
 onMounted(() => {
+  sessionId.value = getOrCreateSessionId()
+  loadHistory()
   connectWs()
+  scrollToBottom()
 })
 
-onBeforeUnmount(() => {
-  connection.value?.close()
-})
+onBeforeUnmount(() => connection.value?.close())
 
-async function onSubmit() {
+function onSubmit() {
   const prompt = input.value.trim()
   if (!prompt || isLoading.value) return
   if (!connection.value || wsStatus.value !== 'open') return
 
-  try {
-    isLoading.value = true
-    message.value = ''
+  isLoading.value = true
+  message.value = ''
 
-    chat.value.qa.push({ question: prompt, answer: '' })
-    await scrollToBottom()
+  chat.value.qa.push({ question: prompt, answer: '' })
+  scrollToBottom()
 
-    // IMPORTANT: escape quotes/newlines safely by sending JSON stringified object
-    const payload = {
-      model: 'deepseek-r1:1.5b',
-      prompt,
-      stream: true
-    }
+  // Send chat request with sessionId
+  connection.value.send(JSON.stringify({
+    type: 'chat',
+    sessionId: sessionId.value,
+    model: model.value,
+    prompt
+  }))
+}
 
-    connection.value.send(JSON.stringify(payload))
-  } catch (e) {
-    console.error(e)
-    isLoading.value = false
-  }
+function stopGenerating() {
+  if (!connection.value || wsStatus.value !== 'open') return
+  connection.value.send(JSON.stringify({ type: 'cancel' }))
 }
 
 function clearChat() {
-  chat.value.qa = []
+  chat.value = { qa: [] }
   message.value = ''
   input.value = ''
+  saveHistory()
 }
 </script>
 
@@ -274,24 +346,12 @@ function clearChat() {
   gap: 12px;
 }
 
-.chat-header {
+.chat-header, .chat-body, .chat-composer {
   border-radius: 18px;
-  backdrop-filter: blur(10px);
-}
-
-.chat-body {
-  border-radius: 18px;
-  overflow: hidden;
 }
 
 .chat-scroll {
   height: calc(100vh - 220px);
-}
-
-.chat-composer {
-  border-radius: 18px;
-  position: sticky;
-  bottom: 12px;
 }
 
 .empty-state {
@@ -300,10 +360,10 @@ function clearChat() {
 }
 
 .bubble {
-  max-width: min(720px, 92%);
+  max-width: min(760px, 92%);
   padding: 12px 14px;
   border-radius: 16px;
-  line-height: 1.4;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -318,18 +378,41 @@ function clearChat() {
   border: 1px solid rgba(255, 255, 255, 0.10);
 }
 
-.bubble-text {
-  font-size: 0.95rem;
+.text-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
-.cursor {
-  display: inline-block;
-  margin-left: 2px;
-  animation: blink 1s steps(1) infinite;
-  opacity: 0.8;
+/* Typing dots */
+.typing {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 0;
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.65);
+  animation: bounce 1.2s infinite ease-in-out;
+}
+.dot:nth-child(2) { animation-delay: .15s; }
+.dot:nth-child(3) { animation-delay: .3s; }
+
+@keyframes bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: .5; }
+  40% { transform: translateY(-4px); opacity: 1; }
 }
 
-@keyframes blink {
-  50% { opacity: 0.15; }
+/* Make code blocks look good */
+:deep(pre.hljs) {
+  padding: 12px;
+  border-radius: 12px;
+  overflow: auto;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+:deep(code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 </style>
