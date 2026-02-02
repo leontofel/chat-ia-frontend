@@ -155,7 +155,7 @@ type Chat = { qa: QA[] }
 const connection = ref<WebSocket | null>(null)
 const wsStatus = ref<'connecting' | 'open' | 'closed'>('connecting')
 
-const model = ref('deepseek-r1:1.5b')
+const model = ref('gemma:2b')
 const message = ref('')
 const input = ref('')
 const chat = ref<Chat>({ qa: [] })
