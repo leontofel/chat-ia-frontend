@@ -185,19 +185,21 @@ function loadHistory() {
     if (!raw) return
     const parsed = JSON.parse(raw)
     if (parsed?.qa?.length) chat.value = parsed
-  } catch {}
+  } catch { /* empty */ }
 }
 
 function saveHistory() {
   try {
     localStorage.setItem(historyKey(), JSON.stringify(chat.value))
-  } catch {}
+  } catch {
+    //
+  }
 }
 
 watch(chat, saveHistory, { deep: true })
 
 // --- Markdown renderer ---
-const md = new MarkdownIt({
+const md: MarkdownIt = new MarkdownIt({
   linkify: true,
   breaks: true,
   highlight: (code, lang) => {
@@ -228,7 +230,9 @@ async function scrollToBottom() {
   await nextTick(() => {
     try {
       scrollArea.value?.setScrollPosition?.('vertical', 10_000_000, 200)
-    } catch {}
+    } catch {
+      //
+    }
   })
 }
 
@@ -242,13 +246,13 @@ function connectWs() {
   ws.onclose = () => { wsStatus.value = 'closed'; isLoading.value = false }
   ws.onerror = () => { wsStatus.value = 'closed'; isLoading.value = false }
 
-  ws.onmessage = (event) => {
+  ws.onmessage = async (event) => {
     if (!event.data) return
     const json = JSON.parse(event.data)
 
     if (json.type === 'delta') {
       message.value += json.content ?? ''
-      scrollToBottom()
+      await scrollToBottom()
       return
     }
 
@@ -260,7 +264,7 @@ function connectWs() {
       }
       isLoading.value = false
       message.value = ''
-      scrollToBottom()
+      await scrollToBottom()
       return
     }
 
@@ -270,7 +274,7 @@ function connectWs() {
       isLoading.value = false
       message.value = ''
       input.value = ''
-      scrollToBottom()
+      await scrollToBottom()
       return
     }
 
@@ -279,21 +283,21 @@ function connectWs() {
       if (last) last.answer = `**Error:** ${json.message ?? 'unknown'}`
       isLoading.value = false
       message.value = ''
-      scrollToBottom()
+      await scrollToBottom()
     }
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   sessionId.value = getOrCreateSessionId()
   loadHistory()
   connectWs()
-  scrollToBottom()
+  await scrollToBottom()
 })
 
 onBeforeUnmount(() => connection.value?.close())
 
-function onSubmit() {
+async function onSubmit() {
   const prompt = input.value.trim()
   if (!prompt || isLoading.value) return
   if (!connection.value || wsStatus.value !== 'open') return
@@ -302,7 +306,7 @@ function onSubmit() {
   message.value = ''
 
   chat.value.qa.push({ question: prompt, answer: '' })
-  scrollToBottom()
+  await scrollToBottom()
 
   // Send chat request with sessionId
   connection.value.send(JSON.stringify({
