@@ -236,10 +236,15 @@ async function scrollToBottom() {
   })
 }
 
+function makeWsUrl(path = "/ws/chat") {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+  return `${proto}//${window.location.host}${path}`
+}
+
 // --- WebSocket ---
 function connectWs() {
   wsStatus.value = 'connecting'
-  const ws = new WebSocket('ws://localhost:8080/ws/chat')
+  const ws = new WebSocket(makeWsUrl("/ws/chat"))
   connection.value = ws
 
   ws.onopen = () => (wsStatus.value = 'open')
